@@ -125,10 +125,93 @@ Claude Code에 질문할 때마다 자동으로 추천이 표시되게 합니다
 
 추천을 따르려면 Claude Code에 `/model opus`, `/effort high`처럼 입력하면 됩니다.
 
+#### 확인 모드 (`--confirm`, 추천)
+
+기본 Hook은 추천을 띄우는 **동시에 질문이 현재 모델로 바로 시작**됩니다.
+모델을 바꿀 기회를 갖고 싶다면 `command` 끝에 `--confirm`을 붙이세요.
+
+```json
+"command": "python /절대/경로/claude-router/claude_router.py --hook --confirm"
+```
+
+1. 질문을 보내면 **Claude가 시작하지 않고** 추천만 표시됩니다.
+2. 필요하면 `/model`, `/effort`로 바꿉니다.
+3. `↑` 키로 같은 질문을 불러와 다시 보내면 그대로 진행됩니다. 추천을 무시하고 싶을 때도 같은 질문을 다시 보내면 됩니다.
+
+- 같은 질문을 10분 안에 다시 보내야 통과합니다. 10분이 지나면 다시 분석합니다.
+- Groq 오류나 키 누락 시에는 멈추지 않고 바로 진행합니다.
+
+## Ubuntu / WSL에서 쓰기
+
+Ubuntu(또는 Windows의 WSL)에서 Claude Code를 쓴다면 아래처럼 설정합니다.
+Ubuntu 24.04부터는 시스템 Python에 `pip install`이 막혀 있어서 전용 가상환경을 만들어 씁니다.
+
+> **WSL 주의:** `python` 대신 `python3`를 쓰고, Windows 경로 `C:/...`는 `/mnt/c/...`로 바꿔야 합니다.
+> 저장소를 Windows 폴더(예: `C:\tools\claude-router`)에 받았다면 아래의 `ROUTER_DIR`을 `/mnt/c/tools/claude-router`로 지정하세요.
+> 이렇게 하면 코드와 `.env`를 Windows와 WSL이 함께 씁니다.
+
+### 1. 가상환경 만들고 설치
+
+먼저 `ROUTER_DIR`에 **`claude_router.py`가 실제로 있는 폴더**를 넣습니다. 아래 둘 중 내 상황에 맞는 하나만 실행하세요.
+
+```bash
+ROUTER_DIR="$HOME/claude-router"   # Ubuntu 홈에 git clone 한 경우
+```
+
+```bash
+ROUTER_DIR="/mnt/c/tools/claude-router"   # Windows 폴더(C:\tools\claude-router)에 받은 경우
+```
+
+경로가 맞는지 확인합니다. 파일 목록이 나오지 않으면 경로가 틀린 것입니다.
+
+```bash
+ls "$ROUTER_DIR/claude_router.py" "$ROUTER_DIR/requirements.txt"
+```
+
+```bash
+python3 -m venv ~/.claude-router-venv && ~/.claude-router-venv/bin/pip install -r "$ROUTER_DIR/requirements.txt"
+```
+
+`python3 -m venv`에서 오류가 나면 먼저 `sudo apt install python3-venv`를 실행하세요.
+
+### 2. `claude-router` 명령 만들기
+
+```bash
+mkdir -p ~/.local/bin && printf '#!/usr/bin/env bash\nexec "$HOME/.claude-router-venv/bin/python" "%s/claude_router.py" "$@"\n' "$ROUTER_DIR" > ~/.local/bin/claude-router && chmod +x ~/.local/bin/claude-router
+```
+
+터미널을 새로 연 뒤 확인합니다:
+
+```bash
+claude-router "파이썬에서 리스트 정렬하는 법"
+```
+
+### 3. Claude Code에서 사용
+
+**직접 실행:** Claude Code 입력창에서 `!`를 앞에 붙이면 셸 명령으로 실행됩니다.
+
+```
+! claude-router "강의자료.pdf 39~42쪽을 읽고 요약해줘"
+```
+
+**자동 실행 (Hook):** `~/.claude/settings.json`에 추가합니다.
+
+```json
+{
+  "hooks": {
+    "UserPromptSubmit": [
+      { "hooks": [ { "type": "command", "command": "claude-router --hook", "timeout": 15 } ] }
+    ]
+  }
+}
+```
+
+설정 후 Claude Code를 다시 시작하세요. `claude-router: command not found`가 뜨면 터미널을 새로 열고 `claude`를 다시 실행하면 됩니다.
+
 ## 알아두면 좋은 점
 
-- **추천만 하고 모델을 자동으로 바꾸지는 않습니다.** Hook은 이미 진행 중인 대화의 모델을 바꿀 수 없어서, 직접 `/model`, `/effort`를 입력해야 합니다.
-- **질문을 막지 않습니다.** Groq 오류, 키 누락, 시간 초과가 생겨도 질문은 그대로 Claude에 전달됩니다.
+- **추천만 하고 모델을 자동으로 바꾸지는 않습니다.** Hook은 Claude Code의 모델을 바꿀 수 없어서, 직접 `/model`, `/effort`를 입력해야 합니다. 바꿀 시간을 가지려면 [확인 모드](#확인-모드---confirm-추천)를 쓰세요.
+- **오류가 나도 질문을 막지 않습니다.** Groq 오류, 키 누락, 시간 초과가 생기면 질문은 그대로 Claude에 전달됩니다.
 - `/help` 같은 슬래시 명령이나 5자 미만의 짧은 입력은 분석하지 않습니다.
 - 질문 내용이 Groq API로 전송됩니다. 민감한 코드나 정보를 다룬다면 이 점을 고려하세요.
 - 질문마다 응답이 2~5초 늦어집니다.
@@ -150,6 +233,9 @@ Claude Code에 질문할 때마다 자동으로 추천이 표시되게 합니다
 | `model_not_found` 오류 | Groq에서 모델이 내려갔을 수 있습니다. [Groq 모델 목록](https://console.groq.com/docs/models)을 확인하고 `GROQ_ROUTER_MODEL`을 바꾸세요 |
 | Hook에서 아무것도 안 뜸 | `command`의 경로가 절대 경로인지, 터미널에서 그 명령이 실행되는지 확인 |
 | `python`을 찾을 수 없음 | macOS/Linux는 `python3`, Windows는 `py`로 바꿔 보세요 |
+| WSL에서 `No such file` | `C:/...` 경로를 `/mnt/c/...`로 바꾸세요 |
+| `externally-managed-environment` 오류 | Ubuntu 24.04의 pip 제한입니다. [Ubuntu / WSL에서 쓰기](#ubuntu--wsl에서-쓰기)처럼 가상환경을 쓰세요 |
+| `claude-router: command not found` | 터미널을 새로 열거나 `source ~/.profile` 실행 |
 | 한글이 깨짐 | Python 3.8 이상인지 확인 |
 
 Hook 동작은 아래 명령으로 직접 테스트할 수 있습니다:

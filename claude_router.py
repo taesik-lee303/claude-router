@@ -5,13 +5,17 @@ Claude Code 앞단 라우터: Groq의 소형 LLM으로 질문 난이도를 먼�
 사용법
   python claude_router.py "질문"          # CLI로 바로 분석
   python claude_router.py                 # 대화형 입력
-  python claude_router.py --hook          # Claude Code UserPromptSubmit 훅 모드 (stdin JSON)
+  python claude_router.py --hook          # Claude Code UserPromptSubmit 훅: 추천만 표시하고 질문은 그대로 진행
+  python claude_router.py --hook --confirm  # 훅 확인 모드: 첫 전송은 멈추고 추천 표시, 같은 질문을 다시 보내면 진행
 
 API 키: 환경 변수 GROQ_API_KEY 또는 같은 폴더의 .env 파일 (GROQ_API_KEY=gsk_...)
 """
+import hashlib
 import json
 import os
 import sys
+import tempfile
+import time
 from pathlib import Path
 
 from groq import Groq
@@ -132,21 +136,73 @@ def format_summary(result: dict) -> str:
     )
 
 
-def run_hook() -> None:
-    """Claude Code UserPromptSubmit 훅: 추천을 사용자 화면에 띄우고, 프롬프트는 절대 막지 않습니다."""
+# 확인 모드에서 "멈췄던 질문"을 기억하는 파일 (세션별로 마지막 1개)
+PENDING_FILE = Path(tempfile.gettempdir()) / "claude_router_pending.json"
+PENDING_TTL_SEC = 600  # 10분 안에 같은 질문을 다시 보내면 통과
+
+
+def _consume_pending(session_id: str, prompt_hash: str) -> bool:
+    """같은 세션에서 직전에 멈춘 질문과 같으면 True (기록은 지움)."""
+    try:
+        pending = json.loads(PENDING_FILE.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return False
+    entry = pending.pop(session_id, None)
+    PENDING_FILE.write_text(json.dumps(pending), encoding="utf-8")
+    return bool(entry) and entry["hash"] == prompt_hash and time.time() - entry["time"] < PENDING_TTL_SEC
+
+
+def _save_pending(session_id: str, prompt_hash: str) -> None:
+    try:
+        pending = json.loads(PENDING_FILE.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        pending = {}
+    pending[session_id] = {"hash": prompt_hash, "time": time.time()}
+    PENDING_FILE.write_text(json.dumps(pending), encoding="utf-8")
+
+
+def _emit(obj: dict) -> None:
+    sys.stdout.buffer.write(json.dumps(obj, ensure_ascii=False).encode("utf-8"))
+    sys.exit(0)
+
+
+def run_hook(confirm: bool = False) -> None:
+    """Claude Code UserPromptSubmit 훅.
+
+    기본: 추천을 화면에 띄우고 질문은 그대로 진행.
+    confirm: 처음 보낸 질문은 멈추고 추천을 보여줌 → /model, /effort 바꾼 뒤 같은 질문을 다시 보내면 진행.
+    오류가 나면 어느 모드든 질문을 막지 않습니다.
+    """
     try:
         payload = json.loads(sys.stdin.buffer.read().decode("utf-8") or "{}")
     except json.JSONDecodeError:
         payload = {}
     prompt = str(payload.get("prompt", "")).strip()
+    session_id = str(payload.get("session_id", "default"))
 
     # 슬래시 명령이나 아주 짧은 입력은 분석 생략
     if not prompt or prompt.startswith("/") or len(prompt) < 5:
         sys.exit(0)
 
+    prompt_hash = hashlib.sha256(prompt.encode("utf-8")).hexdigest()
+    if confirm and _consume_pending(session_id, prompt_hash):
+        _emit({"systemMessage": "[라우터] 확인됨 - 진행합니다."})
+
     result = analyze_prompt_for_claude(prompt, timeout=8.0)
-    sys.stdout.buffer.write(json.dumps({"systemMessage": format_summary(result)}, ensure_ascii=False).encode("utf-8"))
-    sys.exit(0)
+    summary = format_summary(result)
+
+    if confirm and "error" not in result:
+        _save_pending(session_id, prompt_hash)
+        _emit({
+            "decision": "block",
+            "reason": (
+                f"{summary}\n"
+                f"→ 필요하면 /model {result['model']} , /effort {result['effort']} 로 바꾼 뒤 "
+                f"같은 질문을 다시 보내세요 (↑ 키로 불러오기). 그대로 다시 보내면 현재 설정으로 진행합니다."
+            ),
+        })
+
+    _emit({"systemMessage": summary})
 
 
 def main() -> None:
@@ -187,6 +243,6 @@ def main() -> None:
 
 if __name__ == "__main__":
     if "--hook" in sys.argv[1:]:
-        run_hook()
+        run_hook(confirm="--confirm" in sys.argv[1:])
     else:
         main()
